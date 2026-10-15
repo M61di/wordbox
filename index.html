@@ -686,7 +686,7 @@ async function authed(url, opts = {}) {
 function fsError(status, j) {
   const m = (j.error && j.error.message) || '';
   if (/has not been used|is disabled/i.test(m)) return "Firestore isn't turned on for this project yet.";
-  if (/database/i.test(m) && /not exist|not found/i.test(m)) return "The Firestore database isn't created yet.";
+  if (/database/i.test(m) && /does not exist/i.test(m)) return "The Firestore database isn't created yet.";
   if (status === 403 || /permission/i.test(m)) return 'Firebase refused access. Check that the Firestore rules are published.';
   if (status === 401) return 'Please sign in again.';
   return m || ('Server error ' + status);
@@ -694,7 +694,7 @@ function fsError(status, j) {
 async function fsGet() {
   const r = await authed(docUrl());
   let j = {}; try { j = await r.json(); } catch (e) { /* no body */ }
-  if (r.status === 404 && !/database/i.test((j.error && j.error.message) || '')) return null;
+  if (r.status === 404 && !/does not exist/i.test((j.error && j.error.message) || '')) return null;
   if (!r.ok) throw new Error(fsError(r.status, j));
   const s = j.fields && j.fields.data && j.fields.data.stringValue;
   return s ? JSON.parse(s) : null;
