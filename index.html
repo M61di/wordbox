@@ -143,6 +143,10 @@ body.lock{overflow:hidden}
 .toast{position:fixed;left:50%;bottom:calc(92px + env(safe-area-inset-bottom));transform:translate(-50%,12px);background:var(--ink);color:var(--bg);padding:11px 16px;border-radius:12px;font:600 15px/1.25 var(--sans);opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;max-width:86vw;z-index:30;text-align:center}
 .toast.show{opacity:1;transform:translate(-50%,0)}
 
+.sy-msg{min-height:1.4em;margin:0 0 12px;font-size:15px;color:var(--again)}
+.sy-msg.ok{color:var(--ink)}
+.linkbtn{display:block;margin:10px auto 0;background:none;border:0;color:var(--muted);font:600 15px/1.2 var(--sans);text-decoration:underline;padding:10px;cursor:pointer}
+.head-sub{font-size:14px;margin-top:4px}
 @keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 @keyframes up{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
@@ -183,7 +187,7 @@ const I = {
 };
 
 /* ---------- data ---------- */
-const defaults = () => ({ cards: [], settings: { newPerDay: 10, voice: 'en-US', direction: 'forward' }, daily: { date: '', newDone: 0 } });
+const defaults = () => ({ cards: [], settings: { newPerDay: 10, voice: 'en-US', direction: 'forward' }, daily: { date: '', newDone: 0 }, deleted: {}, settingsMod: 0 });
 let db = defaults();
 // Saves to the device. Uses Claude's storage when it exists, otherwise the browser's own storage.
 const ls = (() => { try { const k = '__wb'; localStorage.setItem(k, '1'); localStorage.removeItem(k); return localStorage; } catch (e) { return null; } })();
@@ -205,18 +209,21 @@ async function load() {
       db = {
         cards: Array.isArray(d.cards) ? d.cards : [],
         settings: { ...def.settings, ...d.settings },
-        daily: { ...def.daily, ...d.daily }
+        daily: { ...def.daily, ...d.daily },
+        deleted: { ...(d.deleted || {}) },
+        settingsMod: d.settingsMod || 0
       };
     }
   } catch (e) { /* nothing saved yet */ }
 }
-function save() {
+async function persistNow() {
   if (!storageOk) return;
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(async () => {
-    try { await store.set(KEY, JSON.stringify(db)); }
-    catch (e) { console.error(e); toast("Couldn't save. Export your words to be safe."); }
-  }, 200);
+  try { await store.set(KEY, JSON.stringify(db)); }
+  catch (e) { console.error(e); toast("Couldn't save. Export your words to be safe."); }
+}
+function save() {
+  if (storageOk) { clearTimeout(saveTimer); saveTimer = setTimeout(persistNow, 200); }
+  scheduleSync();
 }
 
 const byId = id => db.cards.find(c => c.id === id);
@@ -227,7 +234,7 @@ function newDoneToday() {
 }
 const makeCard = (front, back, note = '') => ({
   id: uid(), front: front.trim(), back: back.trim(), note: note.trim(),
-  created: Date.now(), seen: false, due: 0, ease: 2.5, interval: 0, reps: 0, lapses: 0
+  created: Date.now(), mod: Date.now(), seen: false, due: 0, ease: 2.5, interval: 0, reps: 0, lapses: 0
 });
 
 /* ---------- scheduling (simplified SM-2, like Anki) ---------- */
@@ -253,7 +260,7 @@ function outcome(c, g) {
 function apply(c, g) {
   const o = outcome(c, g);
   c.ease = o.ease; c.interval = o.interval; c.reps = o.reps;
-  c.due = Date.now() + o.wait; c.seen = true;
+  c.due = Date.now() + o.wait; c.seen = true; c.mod = Date.now();
   if (o.lapse) c.lapses++;
 }
 function fmt(ms) {
@@ -306,7 +313,7 @@ function grade(g) {
 function undo() {
   if (!session || !session.undo) return;
   const s = session.undo, c = byId(s.card.id);
-  if (c) Object.assign(c, s.card);
+  if (c) { Object.assign(c, s.card); c.mod = Date.now(); }
   session.queue = s.queue; session.counts = s.counts; session.graded = s.graded;
   db.daily = s.daily; session.undo = null; session.revealed = false;
   save(); render();
@@ -359,7 +366,7 @@ function viewHome() {
       <p class="muted">${nd ? `The next word comes back in ${fmt(nd - now)}.` : 'Nothing is scheduled yet.'}</p>
       ${unseen ? `<button class="btn" data-act="startMore">Study ${Math.min(5, unseen)} new ${Math.min(5, unseen) === 1 ? 'word' : 'words'} early</button>` : ''}`;
   }
-  return `${banner}<div class="head"><h1>Wordbox</h1></div>
+  return `${banner}<div class="head"><div><h1>Wordbox</h1>${signedIn() ? `<p class="muted head-sub" data-sync-line>${esc(syncLabel())}</p>` : ''}</div></div>
     <section class="stack"><div class="stack-card">${hero}</div></section>
     <section class="progress">
       <h2>Your progress</h2>
@@ -555,7 +562,7 @@ function saveEdit() {
   const f = $('#e-front').value.trim(), b = $('#e-back').value.trim(), n = $('#e-note').value.trim();
   if (!f || !b) { toast('A word needs both the word and its meaning.'); return; }
   if (db.cards.some(o => o.id !== c.id && norm(o.front) === norm(f))) { toast('Another word already uses that spelling.'); return; }
-  c.front = f; c.back = b; c.note = n; save(); closeSheet(); renderList(); toast('Saved');
+  c.front = f; c.back = b; c.note = n; c.mod = Date.now(); save(); closeSheet(); renderList(); toast('Saved');
 }
 function settingsHTML() {
   const s = db.settings;
@@ -566,6 +573,7 @@ function settingsHTML() {
     <div class="field"><label>Show first</label>${seg('setDir', [['forward', 'The word'], ['reverse', 'The meaning']], s.direction)}</div>
     <div class="field"><label for="voice">Pronunciation</label>
       <select id="voice">${voices.map(([v, l]) => `<option value="${v}" ${s.voice === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+    <div class="field"><label>Online sync</label><button class="btn ghost" data-act="syncOpen">${signedIn() ? 'Signed in as ' + esc(S.email) : 'Set up online sync'}</button></div>
     <div class="field"><label>Your words</label><button class="btn ghost" data-act="export">Export words</button></div>
     <button class="btn danger" data-act="deleteAll">Delete all words</button>`;
 }
@@ -587,6 +595,238 @@ async function copyExport() {
   }
 }
 
+/* ---------- online sync (Firebase REST, no extra libraries) ---------- */
+const SYNC_KEY = 'wordbox-sync-v1';
+const S = { apiKey: '', projectId: '', email: '', uid: '', refresh: '', idToken: '', exp: 0, last: 0, state: 'idle', msg: '' };
+let syncBusy = false, syncAgain = false, syncTimer, authBusy = false;
+const configured = () => !!(S.apiKey && S.projectId);
+const signedIn = () => !!(S.refresh && S.uid);
+
+async function loadSync() {
+  if (!store) return;
+  try { Object.assign(S, JSON.parse((await store.get(SYNC_KEY)).value)); } catch (e) { /* not set up yet */ }
+  S.idToken = ''; S.exp = 0; S.state = 'idle'; S.msg = '';
+}
+function saveSync() {
+  if (!store) return;
+  const { apiKey, projectId, email, uid, refresh, last } = S;
+  Promise.resolve(store.set(SYNC_KEY, JSON.stringify({ apiKey, projectId, email, uid, refresh, last }))).catch(() => {});
+}
+function signOutLocal() {
+  S.refresh = ''; S.uid = ''; S.idToken = ''; S.exp = 0; S.state = 'idle'; S.msg = '';
+  saveSync(); updateSyncUI();
+}
+function ago(ts) {
+  const m = Math.round((Date.now() - ts) / MIN);
+  if (m < 1) return 'just now';
+  if (m < 60) return m + (m === 1 ? ' minute ago' : ' minutes ago');
+  const h = Math.round(m / 60);
+  if (h < 24) return h + (h === 1 ? ' hour ago' : ' hours ago');
+  const d = Math.round(h / 24);
+  return d + (d === 1 ? ' day ago' : ' days ago');
+}
+function syncLabel() {
+  if (!configured()) return 'Not set up';
+  if (!signedIn()) return 'Not signed in';
+  if (S.state === 'busy') return 'Syncing…';
+  if (S.state === 'offline') return 'Offline. Your words are safe on this phone and will sync later.';
+  if (S.state === 'error') return S.msg || 'Sync problem';
+  return S.last ? 'Synced ' + ago(S.last) : 'Not synced yet';
+}
+function updateSyncUI() {
+  document.querySelectorAll('[data-sync-line]').forEach(el => { el.textContent = syncLabel(); });
+}
+
+async function api(url, body, form) {
+  const opt = { method: 'POST' };
+  if (form) { opt.headers = { 'Content-Type': 'application/x-www-form-urlencoded' }; opt.body = form; }
+  else { opt.headers = { 'Content-Type': 'application/json' }; opt.body = JSON.stringify(body); }
+  const r = await fetch(url, opt);
+  let j = {}; try { j = await r.json(); } catch (e) { /* no body */ }
+  if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
+  return j;
+}
+function friendly(msg) {
+  const m = String(msg);
+  if (/EMAIL_EXISTS/.test(m)) return 'That email already has an account. Tap Sign in.';
+  if (/INVALID_LOGIN_CREDENTIALS|INVALID_PASSWORD|EMAIL_NOT_FOUND/.test(m)) return 'Wrong email or password.';
+  if (/WEAK_PASSWORD/.test(m)) return 'Use a password with at least 6 characters.';
+  if (/INVALID_EMAIL|MISSING_EMAIL/.test(m)) return 'Check the email address.';
+  if (/MISSING_PASSWORD/.test(m)) return 'Enter a password.';
+  if (/OPERATION_NOT_ALLOWED|CONFIGURATION_NOT_FOUND/.test(m)) return 'Email sign-in is not turned on in Firebase yet.';
+  if (/TOO_MANY_ATTEMPTS/.test(m)) return 'Too many tries. Wait a few minutes and try again.';
+  if (/API key not valid|API_KEY_INVALID|INVALID_API_KEY/i.test(m)) return 'The API key looks wrong. Paste the Firebase settings again.';
+  if (/Failed to fetch|NetworkError|Load failed/i.test(m)) return 'No internet connection.';
+  return m;
+}
+async function authenticate(mode, email, pass) {
+  const ep = mode === 'up' ? 'accounts:signUp' : 'accounts:signInWithPassword';
+  const j = await api(`https://identitytoolkit.googleapis.com/v1/${ep}?key=${encodeURIComponent(S.apiKey)}`, { email, password: pass, returnSecureToken: true });
+  S.email = email; S.uid = j.localId; S.refresh = j.refreshToken; S.idToken = j.idToken;
+  S.exp = Date.now() + (+j.expiresIn || 3600) * 1000; S.last = 0;
+  saveSync();
+}
+async function token() {
+  if (S.idToken && Date.now() < S.exp - 60000) return S.idToken;
+  const j = await api(`https://securetoken.googleapis.com/v1/token?key=${encodeURIComponent(S.apiKey)}`, null,
+    'grant_type=refresh_token&refresh_token=' + encodeURIComponent(S.refresh));
+  S.idToken = j.id_token; S.refresh = j.refresh_token || S.refresh; S.uid = j.user_id || S.uid;
+  S.exp = Date.now() + (+j.expires_in || 3600) * 1000;
+  saveSync();
+  return S.idToken;
+}
+const docUrl = () => `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(S.projectId)}/databases/(default)/documents/users/${encodeURIComponent(S.uid)}`;
+async function authed(url, opts = {}) {
+  for (let i = 0; i < 2; i++) {
+    const r = await fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: 'Bearer ' + await token() } });
+    if (r.status !== 401 || i) return r;
+    S.idToken = '';
+  }
+}
+function fsError(status, j) {
+  const m = (j.error && j.error.message) || '';
+  if (/has not been used|is disabled/i.test(m)) return "Firestore isn't turned on for this project yet.";
+  if (/database/i.test(m) && /not exist|not found/i.test(m)) return "The Firestore database isn't created yet.";
+  if (status === 403 || /permission/i.test(m)) return 'Firebase refused access. Check that the Firestore rules are published.';
+  if (status === 401) return 'Please sign in again.';
+  return m || ('Server error ' + status);
+}
+async function fsGet() {
+  const r = await authed(docUrl());
+  let j = {}; try { j = await r.json(); } catch (e) { /* no body */ }
+  if (r.status === 404 && !/database/i.test((j.error && j.error.message) || '')) return null;
+  if (!r.ok) throw new Error(fsError(r.status, j));
+  const s = j.fields && j.fields.data && j.fields.data.stringValue;
+  return s ? JSON.parse(s) : null;
+}
+async function fsPut(obj) {
+  const body = JSON.stringify({ fields: { data: { stringValue: JSON.stringify(obj) } } });
+  if (body.length > 950000) throw new Error('Your word list is too big to sync.');
+  const r = await authed(docUrl(), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body });
+  if (!r.ok) { let j = {}; try { j = await r.json(); } catch (e) { /* no body */ } throw new Error(fsError(r.status, j)); }
+}
+
+/* merge two copies: the newest version of each card wins, deletions are remembered */
+const cm = c => c.mod || c.created || 0;
+const snap = x => ({ cards: x.cards || [], settings: x.settings || {}, daily: x.daily || {}, deleted: x.deleted || {}, settingsMod: x.settingsMod || 0 });
+function mergeData(a, b) {
+  const dead = {};
+  for (const src of [a.deleted || {}, b.deleted || {}]) for (const id in src) dead[id] = Math.max(dead[id] || 0, src[id]);
+  const map = new Map();
+  for (const c of [...(a.cards || []), ...(b.cards || [])]) {
+    const cur = map.get(c.id);
+    if (!cur || cm(c) > cm(cur)) map.set(c.id, c);
+  }
+  for (const [id, c] of [...map]) if (dead[id] && dead[id] >= cm(c)) map.delete(id);
+  for (const id in dead) if (map.has(id)) delete dead[id];
+  const cards = [...map.values()].sort((x, y) => (x.created || 0) - (y.created || 0));
+  const sA = a.settingsMod || 0, sB = b.settingsMod || 0;
+  const settings = sB > sA ? { ...a.settings, ...b.settings } : { ...b.settings, ...a.settings };
+  const dA = a.daily || {}, dB = b.daily || {};
+  const daily = (dA.date || '') > (dB.date || '') ? dA
+    : (dB.date || '') > (dA.date || '') ? dB
+    : { date: dA.date || '', newDone: Math.max(dA.newDone || 0, dB.newDone || 0) };
+  return { cards, settings, daily, deleted: dead, settingsMod: Math.max(sA, sB) };
+}
+
+function scheduleSync() {
+  if (!configured() || !signedIn()) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => sync(), 4000);
+}
+function refreshView() {
+  if (session) return;
+  if (tab === 'study') render();
+  else if (tab === 'library') renderList();
+}
+async function sync() {
+  if (!configured() || !signedIn() || session) return;
+  if (syncBusy) { syncAgain = true; return; }
+  syncBusy = true; S.state = 'busy'; updateSyncUI();
+  try {
+    const remote = await fsGet();
+    const mine = snap(db);
+    const merged = remote ? mergeData(mine, remote) : mine;
+    const localChanged = JSON.stringify(mine) !== JSON.stringify(merged);
+    if (localChanged) { db = { ...db, ...merged }; await persistNow(); }
+    if (!remote || JSON.stringify(merged) !== JSON.stringify(snap(remote))) await fsPut(merged);
+    S.last = Date.now(); S.state = 'ok'; S.msg = ''; saveSync();
+    if (localChanged) refreshView();
+  } catch (e) {
+    const m = String((e && e.message) || e);
+    if (/Failed to fetch|Load failed|NetworkError/i.test(m) || !navigator.onLine) { S.state = 'offline'; }
+    else if (/TOKEN_EXPIRED|USER_DISABLED|USER_NOT_FOUND|INVALID_REFRESH_TOKEN|CREDENTIAL_TOO_OLD/.test(m)) {
+      signOutLocal(); S.state = 'error'; S.msg = 'Please sign in again.';
+    } else { S.state = 'error'; S.msg = friendly(m); }
+  } finally {
+    syncBusy = false; updateSyncUI();
+    if (syncAgain) { syncAgain = false; scheduleSync(); }
+  }
+}
+
+/* sync screens */
+function syncSheet() {
+  const head = `<div class="sheet-head"><h2>Online sync</h2><button class="icon" data-act="closeSheet" aria-label="Close">${I.close}</button></div>`;
+  if (!configured()) {
+    return head + `<p class="help">Paste the Firebase settings you copied. The app finds the API key and project ID inside them.</p>
+      <div class="field"><label for="sy-cfg">Firebase settings</label>
+        <textarea id="sy-cfg" rows="6" dir="ltr" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="const firebaseConfig = { apiKey: &quot;…&quot;, projectId: &quot;…&quot; };"></textarea></div>
+      <p id="sy-msg" class="sy-msg" role="alert"></p>
+      <button class="btn" data-act="syCfg">Save settings</button>`;
+  }
+  if (!signedIn()) {
+    return head + `<p class="help">Create an account the first time. On your other devices, sign in with the same email and password.</p>
+      <div class="field"><label for="sy-email">Email</label>
+        <input id="sy-email" type="email" inputmode="email" dir="ltr" autocomplete="email" autocapitalize="none" autocorrect="off" spellcheck="false" value="${esc(S.email)}"></div>
+      <div class="field"><label for="sy-pass">Password</label>
+        <input id="sy-pass" type="password" dir="ltr" autocomplete="current-password" autocapitalize="none"></div>
+      <p id="sy-msg" class="sy-msg" role="alert"></p>
+      <button class="btn" data-act="syUp">Create account</button>
+      <button class="btn ghost" data-act="syIn">Sign in</button>
+      <button class="linkbtn" data-act="syForgot">Forgot password</button>
+      <button class="linkbtn" data-act="syCfgReset">Change Firebase settings</button>`;
+  }
+  return head + `<p class="help">Signed in as <b dir="ltr">${esc(S.email)}</b>. Your words save online a few seconds after each change, and load on any device you sign in on.</p>
+    <p class="lead" data-sync-line>${esc(syncLabel())}</p>
+    <div style="height:16px"></div>
+    <button class="btn" data-act="syNow">Sync now</button>
+    <button class="btn ghost" data-act="syOut">Sign out</button>`;
+}
+function syMsg(text, ok) {
+  const el = $('#sy-msg'); if (!el) return;
+  el.textContent = text; el.classList.toggle('ok', !!ok);
+}
+function syncSaveCfg() {
+  const t = $('#sy-cfg').value;
+  const k = (t.match(/apiKey["']?\s*[:=]\s*["']([^"']+)["']/) || [])[1];
+  const p = (t.match(/projectId["']?\s*[:=]\s*["']([^"']+)["']/) || [])[1];
+  if (!k || !p) { syMsg('Could not find apiKey and projectId. Copy the whole block of settings from Firebase.'); return; }
+  S.apiKey = k.trim(); S.projectId = p.trim(); saveSync();
+  $('#sheet-body').innerHTML = syncSheet();
+}
+async function syncAuth(mode) {
+  if (authBusy) return;
+  const email = $('#sy-email').value.trim(), pass = $('#sy-pass').value;
+  if (!email || !pass) { syMsg('Enter your email and password.'); return; }
+  authBusy = true; syMsg('Working…', true);
+  try {
+    await authenticate(mode, email, pass);
+    authBusy = false;
+    $('#sheet-body').innerHTML = syncSheet();
+    toast(mode === 'up' ? 'Account created' : 'Signed in');
+    await sync();
+  } catch (e) { syMsg(friendly(e.message)); }
+  authBusy = false;
+}
+async function syncForgot() {
+  const email = $('#sy-email').value.trim();
+  if (!email) { syMsg('Enter your email first.'); return; }
+  try {
+    await api(`https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${encodeURIComponent(S.apiKey)}`, { requestType: 'PASSWORD_RESET', email });
+    syMsg('Reset email sent. Check your inbox and spam folder.', true);
+  } catch (e) { syMsg(friendly(e.message)); }
+}
+
 /* ---------- events ---------- */
 function handle(act, t) {
   switch (act) {
@@ -597,7 +837,7 @@ function handle(act, t) {
     case 'reveal': if (session) { session.revealed = true; render(); } break;
     case 'grade': grade(+t.dataset.g); break;
     case 'undo': undo(); break;
-    case 'exit': case 'finish': session = null; render(); break;
+    case 'exit': case 'finish': session = null; render(); sync(); break;
     case 'speak': speak(t.dataset.text); break;
     case 'sample': loadSample(); break;
     case 'addCard': addOne(); break;
@@ -606,21 +846,31 @@ function handle(act, t) {
     case 'saveEdit': saveEdit(); break;
     case 'resetCard': {
       const c = byId(editingId); if (!c) break;
-      Object.assign(c, { seen: false, due: 0, ease: 2.5, interval: 0, reps: 0, lapses: 0 });
+      Object.assign(c, { seen: false, due: 0, ease: 2.5, interval: 0, reps: 0, lapses: 0, mod: Date.now() });
       save(); closeSheet(); renderList(); toast('Progress reset'); break;
     }
     case 'deleteCard':
       if (!armed(t, 'Tap again to delete')) break;
+      db.deleted[editingId] = Date.now();
       db.cards = db.cards.filter(c => c.id !== editingId);
       save(); closeSheet(); renderList(); toast('Deleted'); break;
     case 'settings': openSheet(settingsHTML()); break;
-    case 'setNew': db.settings.newPerDay = +t.dataset.v; save(); $('#sheet-body').innerHTML = settingsHTML(); break;
-    case 'setDir': db.settings.direction = t.dataset.v; save(); $('#sheet-body').innerHTML = settingsHTML(); break;
+    case 'setNew': db.settings.newPerDay = +t.dataset.v; db.settingsMod = Date.now(); save(); $('#sheet-body').innerHTML = settingsHTML(); break;
+    case 'setDir': db.settings.direction = t.dataset.v; db.settingsMod = Date.now(); save(); $('#sheet-body').innerHTML = settingsHTML(); break;
     case 'export': openExport(); break;
     case 'copy': copyExport(); break;
     case 'deleteAll':
       if (!armed(t, 'Tap again to delete everything')) break;
+      db.cards.forEach(c => { db.deleted[c.id] = Date.now(); });
       db.cards = []; db.daily = { date: '', newDone: 0 }; save(); closeSheet(); render(); toast('Deleted'); break;
+    case 'syncOpen': openSheet(syncSheet()); break;
+    case 'syCfg': syncSaveCfg(); break;
+    case 'syUp': syncAuth('up'); break;
+    case 'syIn': syncAuth('in'); break;
+    case 'syForgot': syncForgot(); break;
+    case 'syCfgReset': S.apiKey = ''; S.projectId = ''; signOutLocal(); $('#sheet-body').innerHTML = syncSheet(); break;
+    case 'syNow': sync(); break;
+    case 'syOut': signOutLocal(); $('#sheet-body').innerHTML = syncSheet(); toast('Signed out'); break;
     case 'closeSheet': closeSheet(); break;
   }
 }
@@ -630,7 +880,7 @@ document.addEventListener('click', e => {
 });
 document.addEventListener('input', e => { if (e.target.id === 'q') renderList(); });
 document.addEventListener('change', e => {
-  if (e.target.id === 'voice') { db.settings.voice = e.target.value; save(); toast('Saved'); }
+  if (e.target.id === 'voice') { db.settings.voice = e.target.value; db.settingsMod = Date.now(); save(); toast('Saved'); }
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && !$('#sheet').hidden) { closeSheet(); return; }
@@ -640,8 +890,11 @@ document.addEventListener('keydown', e => {
   else if (session.revealed && ['1', '2', '3', '4'].includes(e.key)) grade(+e.key - 1);
 });
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && !session && tab === 'study' && $('#sheet').hidden) render();
+  if (document.hidden) return;
+  if (!session && tab === 'study' && $('#sheet').hidden) render();
+  sync();
 });
+window.addEventListener('online', () => sync());
 
 /* ---------- home screen icon (drawn at runtime so no extra file is needed) ---------- */
 (function icon() {
@@ -658,7 +911,7 @@ document.addEventListener('visibilitychange', () => {
 })();
 
 /* ---------- start ---------- */
-load().then(render);
+load().then(loadSync).then(() => { render(); sync(); });
 })();
 </script>
 </body>
